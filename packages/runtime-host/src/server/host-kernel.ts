@@ -331,7 +331,8 @@ export class RuntimeHostKernel {
     return this.#options.composition.descriptor;
   }
 
-  close(): Promise<void> {
+  close(input?: { readonly reason?: 'retirement' }): Promise<void> {
+    this.#shutdownReason ??= input?.reason;
     this.#requestDrain();
     return this.closed;
   }
@@ -685,6 +686,7 @@ export class RuntimeHostKernel {
           ok: true,
           result: {
             ...this.#statusSnapshot(),
+            upgradeBlockingActivity: this.#hasUpgradeBlockingActivity(),
             compositionModules: this.#composition?.moduleIds ?? [],
             residencies: this.#residencies.snapshot(),
             protocolVersion: RUNTIME_HOST_PROTOCOL_VERSION,
