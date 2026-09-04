@@ -112,9 +112,19 @@ export interface WorkHubCoordinationCandidate {
 
 export type WorkHubCoordinationCandidatesInput = Record<string, never>;
 
+export interface WorkHubCoordinationActiveDelegation {
+  readonly actionId: string;
+  readonly targetSessionId: string;
+  readonly sequence: number;
+}
+
 export interface WorkHubCoordinationCandidatesResult {
   readonly candidateSetId: string;
   readonly candidates: readonly WorkHubCoordinationCandidate[];
+}
+
+export interface WorkHubCoordinationSnapshotResult extends WorkHubCoordinationCandidatesResult {
+  readonly delegations: readonly WorkHubCoordinationActiveDelegation[];
 }
 
 export type WorkHubCoordinationProposal =
@@ -240,7 +250,7 @@ export const WORKHUB_COORDINATION_OPERATION_SPECS = {
   }),
   'workhub.coordination.candidates': defineOperation<
     WorkHubCoordinationCandidatesInput,
-    WorkHubCoordinationCandidatesResult,
+    WorkHubCoordinationSnapshotResult,
     (typeof CANDIDATE_ERRORS)[number]
   >({
     mode: 'query',
@@ -331,12 +341,13 @@ export function decodeWorkHubCoordinationCandidatesInput(
 
 export function decodeWorkHubCoordinationCandidatesResult(
   value: unknown,
-): WorkHubCoordinationCandidatesResult {
+): WorkHubCoordinationSnapshotResult {
   const result = requireExactRecord(value, 'WorkHub Coordination candidates result', [
     'candidateSetId',
     'candidates',
+    'delegations',
   ]);
-  if (!Array.isArray(result.candidates)) {
+  if (!Array.isArray(result.candidates) || !Array.isArray(result.delegations)) {
     throw invalidProtocolFrame('Invalid WorkHub Coordination candidates');
   }
   if (result.candidates.length > WORKHUB_COORDINATION_CANDIDATE_MAX_ITEMS) {
@@ -345,6 +356,18 @@ export function decodeWorkHubCoordinationCandidatesResult(
   return {
     candidateSetId: candidateSetId(result.candidateSetId),
     candidates: result.candidates.map(decodeWorkHubCoordinationCandidate),
+    delegations: result.delegations.map((value) => {
+      const delegation = requireExactRecord(value, 'Active WorkHub delegation', [
+        'actionId',
+        'targetSessionId',
+        'sequence',
+      ]);
+      return {
+        actionId: requireEntityId(delegation.actionId, 'WorkHub action id'),
+        targetSessionId: requireEntityId(delegation.targetSessionId, 'WorkHub target Session id'),
+        sequence: requireCount(delegation.sequence, 'WorkHub transcript sequence'),
+      };
+    }),
   };
 }
 

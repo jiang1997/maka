@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 38;
+export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 39;
 export const SQLITE_SESSION_MESSAGE_CHUNK_BYTES = 64 * 1024;
 export const SQLITE_SESSION_MESSAGE_CHUNK_MARKER = '{"$maka":"session-message-chunks-v1"}';
 
@@ -1266,6 +1266,57 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
       subject TEXT NOT NULL,
       claimed_at INTEGER NOT NULL CHECK (claimed_at >= 0)
     );
+  `,
+  ],
+  [
+    39,
+    `
+    -- Current delegation linkage is a Host-owned projection. The transcript
+    -- remains the historical ledger, but readers no longer need to replay it
+    -- to answer which delegations are active now.
+    CREATE TABLE IF NOT EXISTS workhub_active_delegations (
+      delegation_id TEXT PRIMARY KEY,
+      action_id TEXT NOT NULL UNIQUE,
+      target_session_id TEXT NOT NULL,
+      transcript_sequence INTEGER NOT NULL CHECK (transcript_sequence >= 0),
+      assignment_json TEXT NOT NULL
+    );
+
+    INSERT OR IGNORE INTO workhub_active_delegations(
+      delegation_id, action_id, target_session_id, transcript_sequence, assignment_json
+    )
+    SELECT
+      json_extract(assignment.record_json, '$.delegationId'),
+      json_extract(assignment.record_json, '$.actionId'),
+      json_extract(assignment.record_json, '$.targetSessionId'),
+      assignment.sequence,
+      assignment.record_json
+    FROM session_messages AS assignment
+    WHERE assignment.session_id = 'maka_workhub_coordination'
+      AND json_extract(assignment.record_json, '$.type') = 'workhub_coordination'
+      AND json_extract(assignment.record_json, '$.kind') = 'delegation_assigned'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM session_messages AS terminal
+        WHERE terminal.session_id = assignment.session_id
+          AND json_extract(terminal.record_json, '$.type') = 'workhub_coordination'
+          AND (
+            (
+              json_extract(terminal.record_json, '$.kind') = 'delegation_superseded'
+              AND json_extract(terminal.record_json, '$.supersededDelegationId') =
+                json_extract(assignment.record_json, '$.delegationId')
+            ) OR (
+              json_extract(terminal.record_json, '$.kind') = 'delegation_replacement_aborted'
+              AND json_extract(terminal.record_json, '$.abortedDelegationId') =
+                json_extract(assignment.record_json, '$.delegationId')
+            ) OR (
+              json_extract(terminal.record_json, '$.kind') = 'delegation_stop_resolved'
+              AND json_extract(terminal.record_json, '$.outcome') <> 'not_owned'
+              AND json_extract(terminal.record_json, '$.stopsDelegationId') =
+                json_extract(assignment.record_json, '$.delegationId')
+            )
+          )
+      );
   `,
   ],
 ]);

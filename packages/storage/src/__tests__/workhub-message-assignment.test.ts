@@ -23,6 +23,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 import { messageContentDigest, normalizeMessageContent } from '@maka/core/events';
 import {
   WORKHUB_COORDINATION_SESSION_ID,
@@ -77,6 +78,12 @@ test('atomically commits one WorkHub assignment and target admission', async () 
       ),
       [request.assignment],
     );
+    assert.deepEqual(await store.listActiveWorkHubAssignments(), [
+      {
+        sequence: 0,
+        assignment: request.assignment,
+      },
+    ]);
     const coordination = await store.readHeaderSnapshot(WORKHUB_COORDINATION_SESSION_ID);
     assert.equal(coordination.lastMessageAt, request.assignment.ts);
     await store.markMessagesHandedOff({
@@ -87,6 +94,51 @@ test('atomically commits one WorkHub assignment and target admission', async () 
     const replayAfterConsumption = await store.assignWorkHubMessage(request);
     assert.equal(replayAfterConsumption.kind, 'existing');
     assert.deepEqual(replayAfterConsumption.assignment, request.assignment);
+  } finally {
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('migration backfills active WorkHub assignments from the historical ledger', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-workhub-active-migration-'));
+  const store = createSessionStore(root);
+  try {
+    await createCoordinationSession(store, root);
+    const target = await store.create({
+      cwd: root,
+      name: 'Payments',
+      llmConnectionSlug: 'test',
+      model: 'test',
+      permissionMode: 'ask',
+    });
+    const request = assignmentRequest('legacy-action', target.id, 'Payments', 'legacy-turn');
+    await store.assignWorkHubMessage(request);
+    await store.close?.();
+
+    const legacy = new DatabaseSync(join(root, 'runtime.sqlite'));
+    try {
+      legacy.exec(`
+        DROP TABLE workhub_active_delegations;
+        UPDATE session_metadata_schema
+        SET version = 38
+        WHERE scope = 'session_metadata';
+      `);
+    } finally {
+      legacy.close();
+    }
+
+    const migrated = createSessionStore(root);
+    try {
+      assert.deepEqual(await migrated.listActiveWorkHubAssignments(), [
+        {
+          sequence: 0,
+          assignment: request.assignment,
+        },
+      ]);
+    } finally {
+      await migrated.close?.();
+    }
   } finally {
     await store.close?.();
     await rm(root, { recursive: true, force: true });
@@ -242,6 +294,12 @@ test('atomically commits a replacement assignment with the old-link supersession
         .map((message) => message.kind),
       ['delegation_assigned', 'delegation_assigned', 'delegation_superseded'],
     );
+    assert.deepEqual(await store.listActiveWorkHubAssignments(), [
+      {
+        sequence: 1,
+        assignment: committedAssignment,
+      },
+    ]);
   } finally {
     await store.close?.();
     await rm(root, { recursive: true, force: true });
@@ -317,6 +375,7 @@ test('an aborted replacement cannot later commit a supersession', async () => {
       reason: 'target_unavailable',
     };
     await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [abort]);
+    assert.deepEqual(await store.listActiveWorkHubAssignments(), []);
 
     await assert.rejects(
       store.assignWorkHubMessage({ ...base, assignment, supersession }),
@@ -378,6 +437,10 @@ test('an unresolved stop claim blocks replacement while not_owned releases the l
     };
     await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [request]);
     assert.deepEqual(await store.readWorkHubStopRequest(original.assignment.delegationId), request);
+    assert.deepEqual(
+      (await store.listActiveWorkHubAssignments()).map(({ assignment }) => assignment.actionId),
+      [original.assignment.actionId],
+    );
 
     const base = assignmentRequest('after-stop', destination.id, 'Login', 'destination-turn');
     const assignment: WorkHubDelegationAssignedMessage = {
@@ -426,9 +489,17 @@ test('an unresolved stop claim blocks replacement while not_owned releases the l
       await store.readWorkHubStopResolution(original.assignment.delegationId),
       resolution,
     );
+    assert.deepEqual(
+      (await store.listActiveWorkHubAssignments()).map(({ assignment }) => assignment.actionId),
+      [original.assignment.actionId],
+    );
     assert.equal(
       (await store.assignWorkHubMessage({ ...base, assignment, supersession })).kind,
       'assigned',
+    );
+    assert.deepEqual(
+      (await store.listActiveWorkHubAssignments()).map(({ assignment }) => assignment.actionId),
+      [assignment.actionId],
     );
   } finally {
     await store.close?.();

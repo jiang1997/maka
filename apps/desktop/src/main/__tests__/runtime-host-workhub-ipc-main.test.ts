@@ -51,6 +51,7 @@ test('projects WorkHub coordination resolution through its dedicated IPC domain'
       listWorkHubCoordinationCandidates: async () => ({
         candidateSetId: `sha256:${'a'.repeat(64)}`,
         candidates: [],
+        delegations: [{ actionId: 'action-a', targetSessionId: 'session-a', sequence: 3 }],
       }),
       actWorkHubCoordination: async (input: unknown) => {
         actions.push(input);
@@ -100,6 +101,7 @@ test('projects WorkHub coordination resolution through its dedicated IPC domain'
   assert.deepEqual(await handlers.get('workhub:candidates')?.({}), {
     candidateSetId: `sha256:${'a'.repeat(64)}`,
     candidates: [],
+    delegations: [{ actionId: 'action-a', targetSessionId: 'session-a', sequence: 3 }],
   });
   assert.deepEqual(
     await handlers.get('workhub:act')?.({}, {

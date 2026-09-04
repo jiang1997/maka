@@ -190,6 +190,7 @@ test('WorkHub Coordination answer and summary inputs are closed and bounded', ()
 });
 
 test('WorkHub Coordination candidates are bounded and carry opaque proposal identities', () => {
+  assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 110);
   const result = decodeWorkHubCoordinationCandidatesResult({
     candidateSetId: `sha256:${'a'.repeat(64)}`,
     candidates: [
@@ -205,8 +206,12 @@ test('WorkHub Coordination candidates are bounded and carry opaque proposal iden
         updatedAt: 7,
       },
     ],
+    delegations: [{ actionId: 'action-a', targetSessionId: 'session-a', sequence: 3 }],
   });
   assert.equal(result.candidates[0]?.candidateRef, 'candidate_a');
+  assert.deepEqual(result.delegations, [
+    { actionId: 'action-a', targetSessionId: 'session-a', sequence: 3 },
+  ]);
   assert.equal(HOST_OPERATION_SPECS['workhub.coordination.candidates'].mode, 'query');
   assert.equal(REMOTE_OWNER_OPERATION_GRANTS.includes('workhub.coordination.candidates'), true);
   assert.throws(
@@ -214,6 +219,7 @@ test('WorkHub Coordination candidates are bounded and carry opaque proposal iden
       decodeWorkHubCoordinationCandidatesResult({
         candidateSetId: 'caller-invented',
         candidates: [],
+        delegations: [],
       }),
     (error) => error instanceof RuntimeHostProtocolError,
   );

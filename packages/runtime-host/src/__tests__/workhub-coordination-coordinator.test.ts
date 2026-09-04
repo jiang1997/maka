@@ -545,6 +545,17 @@ describe('Host WorkHub Coordination coordinator', () => {
         ],
       );
       assert.equal(assignments.length, 1);
+      assert.deepEqual(candidates.result.delegations, []);
+      const current = await first.handlers['workhub.coordination.candidates']({}, CONTEXT);
+      assert.equal(current.ok, true);
+      if (!current.ok) return;
+      assert.deepEqual(current.result.delegations, [
+        {
+          actionId: 'payments-action',
+          targetSessionId: candidates.result.candidates[0]!.sessionId,
+          sequence: 0,
+        },
+      ]);
     } finally {
       await store.close?.();
     }
@@ -656,6 +667,7 @@ describe('Host WorkHub Coordination coordinator', () => {
         (await store.readWorkHubStopResolution(assignment.delegationId))?.outcome,
         'stop_delivered',
       );
+      assert.deepEqual(await store.listActiveWorkHubAssignments(), []);
     } finally {
       await store.close?.();
     }
@@ -701,18 +713,12 @@ describe('Host WorkHub Coordination coordinator', () => {
       let injected = false;
       const stores = new Proxy(store, {
         get(authority, property, receiver) {
-          if (property === 'readMessagesSnapshot') {
-            return async (sessionId: string) => {
-              const messages = await authority.readMessagesSnapshot(sessionId);
+          if (property === 'listActiveWorkHubAssignments') {
+            return async () => {
+              const assignments = await authority.listActiveWorkHubAssignments();
               if (
                 !injected &&
-                sessionId === WORKHUB_COORDINATION_SESSION_ID &&
-                messages.some(
-                  (message) =>
-                    message.type === 'workhub_coordination' &&
-                    message.kind === 'delegation_assigned' &&
-                    message.actionId === 'source-action',
-                )
+                assignments.some(({ assignment }) => assignment.actionId === 'source-action')
               ) {
                 injected = true;
                 await persistTestAssignment(
@@ -728,7 +734,7 @@ describe('Host WorkHub Coordination coordinator', () => {
                   'racing-turn',
                 );
               }
-              return messages;
+              return assignments;
             };
           }
           const value = Reflect.get(authority, property, receiver) as unknown;
@@ -1305,11 +1311,9 @@ describe('Host WorkHub Coordination coordinator', () => {
     }
   });
 
-  test('one stop reads the Coordination transcript twice, not once per proof', async () => {
-    // The Gate derives the delegation from the active links, then admission
-    // reproves it under the lease. Those are the two reads that decide. Any
-    // further pass re-derives an answer the stop already holds, on a transcript
-    // that only grows.
+  test('one stop reads the active delegation authority twice, not the transcript', async () => {
+    // The Gate derives the delegation, then admission reproves it under the
+    // lease. Those are the two current-state reads that decide.
     const root = await mkdtemp(join(tmpdir(), 'maka-workhub-scan-count-'));
     const store = createSessionStore(root);
     try {
@@ -1324,10 +1328,10 @@ describe('Host WorkHub Coordination coordinator', () => {
       let counting = false;
       const stores = new Proxy(store, {
         get(authority, property, receiver) {
-          if (property === 'readMessagesSnapshot') {
-            return async (sessionId: string) => {
-              if (counting && sessionId === WORKHUB_COORDINATION_SESSION_ID) coordinationReads += 1;
-              return authority.readMessagesSnapshot(sessionId);
+          if (property === 'listActiveWorkHubAssignments') {
+            return async () => {
+              if (counting) coordinationReads += 1;
+              return authority.listActiveWorkHubAssignments();
             };
           }
           const value = Reflect.get(authority, property, receiver) as unknown;

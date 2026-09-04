@@ -29,6 +29,7 @@ import {
   type SqliteSessionMetadataStore,
   type StableSessionCreateProbe,
   type VersionedSessionIdentity,
+  type ActiveWorkHubAssignment,
 } from './sqlite-session-metadata-store.js';
 import { isDiscardableConversationCopy } from './session-conversation-copy.js';
 import {
@@ -424,6 +425,8 @@ export interface SessionAuthorityStore extends SessionStore, MessageAdmissionSto
   assignWorkHubMessage(
     request: WorkHubMessageAssignmentRequest,
   ): Promise<WorkHubMessageAssignmentResult>;
+  /** Current Host-owned delegation linkage; does not replay the transcript. */
+  listActiveWorkHubAssignments(): Promise<readonly ActiveWorkHubAssignment[]>;
   readWorkHubAssignment(actionId: string): Promise<WorkHubDelegationAssignedMessage | undefined>;
   readWorkHubReplacement(
     delegationId: string,
@@ -686,6 +689,11 @@ class SqliteSessionStore implements SessionAuthorityStore {
       }
     }
     return result;
+  }
+
+  async listActiveWorkHubAssignments(): Promise<readonly ActiveWorkHubAssignment[]> {
+    await this.ensureReady();
+    return this.metadata.listActiveWorkHubAssignments();
   }
 
   async readWorkHubAssignment(

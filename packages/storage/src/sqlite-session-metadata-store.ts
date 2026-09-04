@@ -244,6 +244,11 @@ export interface SqliteWorkHubMessageAssignmentResult {
   readonly assignment: WorkHubDelegationAssignedMessage;
 }
 
+export interface ActiveWorkHubAssignment {
+  readonly sequence: number;
+  readonly assignment: WorkHubDelegationAssignedMessage;
+}
+
 export interface SessionMetadataRecord {
   header: SessionHeader;
   metadataVersion: number;
@@ -1606,6 +1611,7 @@ export class SqliteSessionMetadataStore {
       }
       const sequence = row.last_sequence + 1;
       this.insertSessionMessagesSync(sessionId, sequence, encoded);
+      this.updateActiveWorkHubAssignmentsSync(sessionId, sequence, encoded);
       this.updateCatalogProjectionSync(sessionId, projection, false, lockConnection);
     });
   }
@@ -1924,18 +1930,49 @@ export class SqliteSessionMetadataStore {
       ) {
         throw new SessionMetadataConflictError('Invalid WorkHub transcript sequence');
       }
-      this.insertSessionMessagesSync(
+      const firstSequence = sequenceRow.last_sequence + 1;
+      const entries = [
+        { message: committedAssignment, json: committedAssignmentJson },
+        ...(supersession && supersessionJson
+          ? [{ message: supersession, json: supersessionJson }]
+          : []),
+      ];
+      this.insertSessionMessagesSync(WORKHUB_COORDINATION_SESSION_ID, firstSequence, entries);
+      this.updateActiveWorkHubAssignmentsSync(
         WORKHUB_COORDINATION_SESSION_ID,
-        sequenceRow.last_sequence + 1,
-        [
-          { message: committedAssignment, json: committedAssignmentJson },
-          ...(supersession && supersessionJson
-            ? [{ message: supersession, json: supersessionJson }]
-            : []),
-        ],
+        firstSequence,
+        entries,
       );
       this.updateCatalogProjectionSync(WORKHUB_COORDINATION_SESSION_ID, request.projection, false);
       return { kind: 'assigned' as const, targetCreated, assignment: committedAssignment };
+    });
+  }
+
+  async listActiveWorkHubAssignments(): Promise<readonly ActiveWorkHubAssignment[]> {
+    this.assertOpen();
+    return this.readTransaction(() => {
+      const rows = this.db
+        .prepare(
+          `
+          SELECT transcript_sequence, assignment_json
+          FROM workhub_active_delegations
+          ORDER BY transcript_sequence, delegation_id
+        `,
+        )
+        .all() as unknown as Array<{
+        readonly transcript_sequence: number;
+        readonly assignment_json: string;
+      }>;
+      return rows.map((row) => {
+        const assignment = decodeStoredMessage(JSON.parse(row.assignment_json) as unknown);
+        if (
+          assignment.type !== 'workhub_coordination' ||
+          assignment.kind !== 'delegation_assigned'
+        ) {
+          throw new SessionMetadataConflictError('Invalid active WorkHub assignment');
+        }
+        return { sequence: row.transcript_sequence, assignment };
+      });
     });
   }
 
@@ -5480,6 +5517,42 @@ export class SqliteSessionMetadataStore {
           chunk,
           createHash('sha256').update(chunk).digest('hex'),
         );
+      }
+    }
+  }
+
+  private updateActiveWorkHubAssignmentsSync(
+    sessionId: string,
+    firstSequence: number,
+    entries: readonly { readonly message: StoredMessage; readonly json: string }[],
+  ): void {
+    if (sessionId !== WORKHUB_COORDINATION_SESSION_ID) return;
+    const insert = this.db.prepare(`
+      INSERT INTO workhub_active_delegations(
+        delegation_id, action_id, target_session_id, transcript_sequence, assignment_json
+      ) VALUES (?, ?, ?, ?, ?)
+    `);
+    const remove = this.db.prepare(
+      'DELETE FROM workhub_active_delegations WHERE delegation_id = ?',
+    );
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index]!;
+      const message = entry.message;
+      if (message.type !== 'workhub_coordination') continue;
+      if (message.kind === 'delegation_assigned') {
+        insert.run(
+          message.delegationId,
+          message.actionId,
+          message.targetSessionId,
+          firstSequence + index,
+          entry.json,
+        );
+      } else if (message.kind === 'delegation_superseded') {
+        remove.run(message.supersededDelegationId);
+      } else if (message.kind === 'delegation_replacement_aborted') {
+        remove.run(message.abortedDelegationId);
+      } else if (message.kind === 'delegation_stop_resolved' && message.outcome !== 'not_owned') {
+        remove.run(message.stopsDelegationId);
       }
     }
   }
